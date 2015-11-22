@@ -1,7 +1,6 @@
 
 test: install
 	@./node_modules/.bin/mocha \
-		--harmony-generators \
 		--reporter spec
 
 install:
@@ -12,7 +11,7 @@ dist: install dist-build dist-minify
 
 dist-build:
 	@mkdir -p dist
-	@./node_modules/.bin/browserify index.js -o dist/vo.js
+	@./node_modules/.bin/browserify index.js -s Vo > dist/vo.js
 
 dist-minify: dist/vo.js
 	@curl -s \

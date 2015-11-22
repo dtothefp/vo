@@ -1,11 +1,15 @@
-(function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);var f=new Error("Cannot find module '"+o+"'");throw f.code="MODULE_NOT_FOUND",f}var l=n[o]={exports:{}};t[o][0].call(l.exports,function(e){var n=t[o][1][e];return s(n?n:e)},l,l.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(require,module,exports){
+(function(f){if(typeof exports==="object"&&typeof module!=="undefined"){module.exports=f()}else if(typeof define==="function"&&define.amd){define([],f)}else{var g;if(typeof window!=="undefined"){g=window}else if(typeof global!=="undefined"){g=global}else if(typeof self!=="undefined"){g=self}else{g=this}g.Vo = f()}})(function(){var define,module,exports;return (function e(t,n,r){function s(o,u){if(!n[o]){if(!t[o]){var a=typeof require=="function"&&require;if(!u&&a)return a(o,!0);if(i)return i(o,!0);var f=new Error("Cannot find module '"+o+"'");throw f.code="MODULE_NOT_FOUND",f}var l=n[o]={exports:{}};t[o][0].call(l.exports,function(e){var n=t[o][1][e];return s(n?n:e)},l,l.exports,e,t,n,r)}return n[o].exports}var i=typeof require=="function"&&require;for(var o=0;o<r.length;o++)s(r[o]);return s})({1:[function(require,module,exports){
+'use strict';
+
 /**
  * Module Dependencies
  */
 
+var foreach = require('foreach');
 var sliced = require('sliced');
 var wrap = require('wrap-fn');
 var isArray = Array.isArray;
+var noop = function () {};
 var keys = Object.keys;
 
 /**
@@ -24,20 +28,57 @@ module.exports = Vo;
 function Vo() {
   var pipeline = sliced(arguments);
 
+  var options = {
+    pipeline: true,
+    catch: false
+  };
+
   function vo() {
     var args = sliced(arguments);
     var last = args[args.length - 1];
 
-    // TODO: thunk support
-    var done = 'function' == typeof last
-      ? args.pop()
-      : function() {};
+    if (typeof last === 'function') {
+      var done = args.pop();
+      start(args, done);
+    } else {
+      return curry;
+    }
 
-    series(pipeline, args, function(err, v) {
-      if (err) return done(err);
-      return done(null, v);
-    });
+    function curry(done) {
+      start(args, done);
+    }
+
+    function start(args, done) {
+      series(pipeline, args, options, function(err, v) {
+        if (err) return done(err);
+        return done(null, v);
+      });
+    }
   }
+
+  /**
+   * Catch errors
+   *
+   * @param {Function} fn
+   * @return {Vo}
+   */
+
+  vo.catch = function(fn) {
+    options.catch = 'boolean' == typeof fn ? noop : fn;
+    return vo;
+  }
+
+  /**
+   * Pipeline/Middleware support
+   *
+   * @param {Boolean} pipeline
+   * @return {Vo}
+   */
+
+  vo.pipeline = function(pipeline) {
+    options.pipeline = !!pipeline;
+    return vo;
+  };
 
   // TODO: would love to replace this
   // with "vo instanceof Vo"
@@ -54,20 +95,32 @@ function Vo() {
  * @param {Function} done
  */
 
-function series(pipeline, args, done) {
+function series(pipeline, args, options, done) {
   var pending = pipeline.length;
-  var fns = pipeline.map(seed);
+  var fns = pipeline.map(seed(options));
   var first = fns.shift();
   var ret = [];
 
-  first(args, next);
+  first(args, response);
 
-  function next(err) {
-    if (err) return done(err);
-    var v = sliced(arguments, 1);
+  function response(err) {
+    if (err && options.catch && !err._skip) return caught.apply(null, arguments);
+    else if (err) return done(err);
+    next(sliced(arguments, 1));
+  }
+
+  function caught(err) {
+    err.upstream = sliced(arguments, 1);
+    wrap(options.catch, function(err) {
+      if (err) return done(err);
+      next(sliced(arguments, 1));
+    })(err);
+  }
+
+  function next(v) {
     var fn = fns.shift();
-    if (!fn) return done(null, v.length == 1 ? v[0] : v);
-    fn(v, next);
+    if (!fn) return done(null, v.length === 1 ? v[0] : v);
+    fn(v, response);
   }
 }
 
@@ -78,15 +131,17 @@ function series(pipeline, args, done) {
  * @return {Function}
  */
 
-function seed(v) {
-  var t = type(v);
+function seed(options) {
+  return function _seed(v) {
+    var t = type(v);
 
-  switch(t) {
-    case 'function': return resolve_function(v);
-    case 'object': return resolve_object(v);
-    case 'array': return resolve_array(v);
-    case 'vo': return resolve_vo(v);
-    default: return function(args, done) { return done() };
+    switch(t) {
+      case 'function': return resolve_function(v);
+      case 'object': return resolve(v, options);
+      case 'array': return resolve(v, options);
+      case 'vo': return resolve_vo(v);
+      default: return function(args, done) { return done() };
+    }
   }
 }
 
@@ -99,7 +154,10 @@ function seed(v) {
 
 function resolve_vo(vo) {
   return function _resolve_vo(args, done) {
-    return vo.apply(null, args.concat(done));
+    return vo.apply(null, args.concat(function(err) {
+      if (err) done.apply(null, [err].concat(args));
+      else done.apply(null, arguments);
+    }));
   }
 }
 
@@ -113,26 +171,28 @@ function resolve_vo(vo) {
 
 function resolve_function(fn) {
   return function _resolve_function(args, done) {
-    wrap(fn, done).apply(null, args);
+    wrap(fn, function(err) {
+      if (err) done.apply(null, [err].concat(args));
+      else done.apply(null, arguments);
+    }).apply(null, args);
   }
 }
 
 /**
- * Resolve an object recursively
+ * Resolve an object/array recursively (sync)
  *
- * @param {Object} obj
+ * @param {Object|Array} obj
  * @return {Function}
  */
 
-function resolve_object(obj) {
-  return function _resolve_object(args, done) {
+function resolve(obj, options) {
+  return function _resolve(args, done) {
     var parallel = {};
     var pending = 0;
     var out = {};
 
     // map out the parallel functions first
-    keys(obj).forEach(function(k) {
-      var v = obj[k];
+    foreach(obj, function(v, k) {
       var t = type(v);
 
       switch(t) {
@@ -141,11 +201,11 @@ function resolve_object(obj) {
           pending++;
           break;
         case 'array':
-          parallel[k] = resolve_array(v);
+          parallel[k] = resolve(v);
           pending++;
           break;
         case 'object':
-          parallel[k] = resolve_object(v);
+          parallel[k] = resolve(v);
           pending++;
           break;
         case 'vo':
@@ -155,74 +215,36 @@ function resolve_object(obj) {
         default:
           out[k] = v;
       }
-
     });
 
     // make the requests
-    keys(parallel).forEach(function(k) {
-      var v = parallel[k];
+    foreach(parallel, function(v, k) {
       if (!v) return;
-      v(args, function(err) {
-        if (err) return done(err);
-        var ret = sliced(arguments, 1);
-        out[k] = ret.length == 1 ? ret[0] : ret;
-        if (!--pending) return done(null, out);
-      });
-    });
-  }
-}
+      v(args, response);
 
-/**
- * Resolve an array recursively
- *
- * @param {Array} arr
- * @return {Function}
- */
-
-function resolve_array(arr) {
-  return function _resolve_array(args, done) {
-    var parallel = [];
-    var pending = 0;
-    var out = [];
-
-    // map out the parallel functions first
-    arr.forEach(function(v, k) {
-      var t = type(v);
-      var v = arr[k];
-
-      switch(t) {
-        case 'function':
-          parallel[k] = resolve_function(v);
-          pending++;
-          break;
-        case 'array':
-          parallel[k] = resolve_array(v);
-          pending++;
-          break;
-        case 'object':
-          parallel[k] = resolve_object(v);
-          pending++;
-          break;
-        case 'vo':
-          parallel[k] = resolve_vo(v);
-          pending++;
-          break;
-        default:
-          out[k] = v;
+      function response(err) {
+        if (err && options.catch) return caught.apply(null, arguments);
+        else if (err) return done(err);
+        next(sliced(arguments, 1));
       }
-    });
 
-    // make the parallel requests
-    parallel.forEach(function(v, i) {
-      if (!v) return;
-      v(args, function(err) {
-        if (err) return done(err);
-        var ret = sliced(arguments, 1);
-        out[i] = ret.length == 1 ? ret[0] : ret;
-        if (!--pending) {
-          return done(null, out);
-        }
-      });
+      function caught(err) {
+        err.upstream = sliced(arguments, 1);
+        wrap(options.catch, function(err) {
+          if (err) {
+            // TODO: fix up, right now prevents double onerror callbacks
+            err._skip = true;
+            return done(err);
+          }
+
+          next(sliced(arguments, 1));
+        })(err);
+      }
+
+      function next(args) {
+        out[k] = args.length === 1 ? args[0] : args;
+        if (!--pending) return done(null, out);
+      }
     });
   }
 }
@@ -237,15 +259,39 @@ function resolve_array(arr) {
 function type(v) {
   return isArray(v)
     ? 'array'
-    : v.vo
-    ? 'vo'
-    : typeof v;
+    : v && v.vo
+      ? 'vo'
+      : typeof v;
 }
 
-},{"sliced":2,"wrap-fn":4}],2:[function(require,module,exports){
+},{"foreach":2,"sliced":3,"wrap-fn":5}],2:[function(require,module,exports){
+
+var hasOwn = Object.prototype.hasOwnProperty;
+var toString = Object.prototype.toString;
+
+module.exports = function forEach (obj, fn, ctx) {
+    if (toString.call(fn) !== '[object Function]') {
+        throw new TypeError('iterator must be a function');
+    }
+    var l = obj.length;
+    if (l === +l) {
+        for (var i = 0; i < l; i++) {
+            fn.call(ctx, obj[i], i, obj);
+        }
+    } else {
+        for (var k in obj) {
+            if (hasOwn.call(obj, k)) {
+                fn.call(ctx, obj[k], k, obj);
+            }
+        }
+    }
+};
+
+
+},{}],3:[function(require,module,exports){
 module.exports = exports = require('./lib/sliced');
 
-},{"./lib/sliced":3}],3:[function(require,module,exports){
+},{"./lib/sliced":4}],4:[function(require,module,exports){
 
 /**
  * An Array.prototype.slice.call(arguments) alternative
@@ -280,7 +326,7 @@ module.exports = function (args, slice, sliceEnd) {
 }
 
 
-},{}],4:[function(require,module,exports){
+},{}],5:[function(require,module,exports){
 /**
  * Module Dependencies
  */
@@ -407,7 +453,7 @@ function once(fn) {
   };
 }
 
-},{"co":5}],5:[function(require,module,exports){
+},{"co":6}],6:[function(require,module,exports){
 
 /**
  * slice() reference.
@@ -703,4 +749,5 @@ function error(err) {
   });
 }
 
-},{}]},{},[1]);
+},{}]},{},[1])(1)
+});
